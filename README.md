@@ -16,4 +16,5 @@ The definition of the dataset can be found in the aforementioned paper. Roughly 
 
 ![](from_Z_to_Y.png)
 
-Simply speaking, the KRnet will map a 4d standard Gaussian to the empirical distribution given by the 4d dataset. We here only plot the first two dimensions. Here $Z$ indicates a standard Gaussian random variable, $Y$ the random variable corresponding to the dataset, and $z=f(y)$ and invertible mapping given by KRnet. 
+Simply speaking, the KRnet will map a 4d standard Gaussian to the empirical distribution given by the 4d dataset. We here only plot the first two dimensions. Here $Z$ indicates a standard Gaussian random variable, $Y$ the random variable corresponding to the dataset, and $z=f(y)$ the invertible mapping given by KRnet. So the probability measure for $Y$ is the pushforward of the probability measure for $Z$ through the mapping $f^{-1}(\cdot)$. 
+
