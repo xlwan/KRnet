@@ -2,6 +2,9 @@ from __future__ import absolute_import, division, print_function, unicode_litera
 import tensorflow as tf
 import numpy as np
 import time
+
+import sys
+sys.path.append('../')
 import BR_lib.BR_model as BR_model
 import BR_lib.BR_data as BR_data
 
@@ -20,40 +23,28 @@ if gpus:
 def main(args):
     def get_data(n_train, n_dim):
         w = np.ones((n_train,1), dtype='float32')
-
-        # Logistic 4d
-        x = np.zeros((n_train, 4), dtype='float32')
-        if n_dim != 4:
-          print("The demo is for dimension 4!")
-          quit()
-        print("Generate the training set with {} total samples:".format(n_train))
-        x,_ = BR_data.gen_xd_Logistic_w_2d_hole(n_dim, n_train, 2.0, 3.0, np.pi/4.0, 7.6)
+        
+        x, _ = BR_data.gen_xd_Logistic_w_2d_hole(n_dim, n_train, 2.0, 3.0, np.pi/4.0, 7.6)
+        #np.savetxt('./dataset_for_training/Logistic_8d_w_2d_holes_double.dat'.format(), x)
         return x,w
 
     x,w = get_data(args.n_train, args.n_dim)
+
     data_flow = BR_data.dataflow(x, buffersize=args.n_train, batchsize=args.batch_size, y=w)
     train_dataset = data_flow.get_shuffled_batched_dataset()
 
     # create the model
     def create_model():
-        # get a support for the data
-        xlb = np.amin(x, axis=0).reshape(1,-1)
-        xhb = np.amax(x, axis=0).reshape(1,-1)
-        margin = (xhb-xlb)*0.2/2.0 # we enlarge the support 20% in each dimension
-        xlb -= margin
-        xhb += margin
-
         # build up the model
-        pdf_model = BR_model.IM_rNVP_KR('pdf_model_KR',
+        pdf_model = BR_model.IM_rNVP_KR_CDF('pdf_model_KR_CDF',
                                             args.n_dim,
-                                            xlb, xhb,
                                             args.n_step,
                                             args.n_depth,
                                             n_width=args.n_width,
+                                            n_bins=args.n_bins4cdf,
                                             shrink_rate=args.shrink_rate,
                                             flow_coupling=args.flow_coupling,
-                                            rotation=args.rotation,
-                                            bounded_supp=args.bounded_supp)
+                                            rotation=args.rotation)
         return pdf_model
 
     # call model one to complete the building process
@@ -65,7 +56,11 @@ def main(args):
         pdf = pdf_model(x)
         loss = -tf.reduce_mean(pdf*w)
 
-        return loss
+        reg = tf.constant(0.0)
+
+        loss += reg
+
+        return loss, reg
 
     # metrics for loss and regularization
     loss_metric = tf.keras.metrics.Mean()
@@ -84,6 +79,8 @@ def main(args):
         print(" ------ Initializing from scratch ------")
         m = 4 # the number minibatches used for data initialization
         x_init = data_flow.get_n_batch_from_shuffled_batched_dataset(m)
+        #if args.rotation:
+        #    pdf_model.WLU_data_initialization()
         pdf_model.actnorm_data_initialization()
         pdf_model(x_init)
     # summary
@@ -94,19 +91,20 @@ def main(args):
     def train_step(inputs, vars):
         xt, wt = inputs
         with tf.GradientTape() as tape:
-            loss = get_loss(xt, wt)
+            loss, reg = get_loss(xt, wt)
 
         grads = tape.gradient(loss, vars)
         optimizer.apply_gradients(zip(grads, vars))
 
-        return loss
+        return loss, reg
 
     # used for the computation of KL divergence
-    n_valid = 320000
-    print("Generate the validation set with {} total samples:".format(n_valid))
-    y,_ = BR_data.gen_xd_Logistic_w_2d_hole(args.n_dim, n_valid, 2.0, 3.0, np.pi/4.0, 7.6)
+    n_valid = 16000
+    #y = np.loadtxt('./dataset_for_training/Logistic_8d_w_2d_holes_valid.dat').astype(np.float32)[:n_valid,:]
+    y, _ = BR_data.gen_xd_Logistic_w_2d_hole(args.n_dim, n_valid, 2.0, 3.0, np.pi/4.0, 7.6)
 
     loss_vs_epoch=[]
+    reg_vs_epoch=[]
     KL_vs_epoch=[]
 
     n_epochs = args.n_epochs
@@ -120,9 +118,10 @@ def main(args):
             start_time = time.time()
             # iterate over the batches of the dataset
             for step, train_batch in enumerate(train_dataset):
-                loss = train_step((train_batch[0], train_batch[1]), g_vars)
+                loss, reg = train_step((train_batch[0], train_batch[1]), g_vars)
 
-                loss_metric(loss)
+                loss_metric(loss-reg)
+                reg_metric(reg)
 
                 iteration += 1
 
@@ -132,20 +131,20 @@ def main(args):
     
             ln_f = pdf_model(y)
             ln_y = -y/2.0 - np.log(2.0) -2.0*np.log(1+np.exp(-y/2.0))
-            # for 4d
-            ln_y = tf.reduce_sum(ln_y, axis=1, keepdims=True) - np.log(0.18360558216051442)
-            # for 8d
-            #ln_y = tf.reduce_sum(ln_y, axis=1, keepdims=True) - np.log(0.0220251667263824)
+            ln_y = tf.reduce_sum(ln_y, axis=1, keepdims=True) - np.log(0.18360558216051442) # for 4d
+            #ln_y = tf.reduce_sum(ln_y, axis=1, keepdims=True) - np.log(0.0220251667263824) # for 8d H is: -21.527786
             kl_d = -tf.reduce_mean(ln_f-ln_y)
 
-            print('epoch %s, iteration %s, loss = %s, kl_d = %s, time = %s' %
-                             (i, iteration, loss_metric.result().numpy(), 
+            print('epoch %s, iteration %s, loss = %s, reg = %s,  kl_d = %s, time = %s' %
+                             (i, iteration, loss_metric.result().numpy(), reg_metric.result().numpy(), 
                                  kl_d.numpy(), time.time()-start_time))
 
             loss_vs_epoch += [loss_metric.result().numpy()]
+            reg_vs_epoch  += [reg_metric.result().numpy()]
             KL_vs_epoch += [kl_d.numpy()]
 
             loss_metric.reset_states()
+            reg_metric.reset_states()
 
             # re-shuffle the dataset
             train_dataset = data_flow.update_shuffled_batched_dataset()
@@ -163,9 +162,9 @@ def main(args):
 
         c1=np.array(range(1,n_epochs+1)).reshape(-1,1)
         c2=np.array(loss_vs_epoch).reshape(-1,1)
-        c3=np.array(KL_vs_epoch).reshape(-1,1)
-        np.savetxt('cong_vs_epoch.dat',np.concatenate((c1, c2, c3), axis=1))
-
+        c3=np.array(reg_vs_epoch).reshape(-1,1)
+        c4=np.array(KL_vs_epoch).reshape(-1,1)
+        np.savetxt('cong_vs_epoch.dat',np.concatenate((c1, c2, c3, c4), axis=1))
 
 if __name__ == '__main__':
     from configargparse import ArgParser
@@ -185,15 +184,14 @@ if __name__ == '__main__':
     p.add('--n_step', type=int, default=1, help='The step size for dimension reduction in each squeezing layer.')
     p.add('--rotation', action='store_true', help='Specify rotation layers or not?')
     #p.set_defaults(rotation=True)
-    p.add('--bounded_supp', action='store_true', help='Assume a bounded support for data.')
-    #p.set_defaults(bounded_supp=True)
+    p.add('--n_bins4cdf', type=int, default=4, help='The number of bins for uniform partition of the support of PDF.')
     p.add('--flow_coupling', type=int, default=1, help='Coupling type: 0=additive, 1=affine.')
-    p.add('--shrink_rate', type=float, default=1.0, help='The shrinking rate of the width of NN.')
+    p.add('--shrink_rate', type=float, default=0.9, help='The shrinking rate of the width of NN.')
 
     #optimization hyperparams:
     p.add("--n_dim", type=int, default=4, help='The number of random dimension.')
-    p.add("--n_train", type=int, default=640000, help='The number of samples in the training set.')
-    p.add('--batch_size', type=int, default=80000, help='Batch size of training generator.')
+    p.add("--n_train", type=int, default=16000, help='The number of samples in the training set.')
+    p.add('--batch_size', type=int, default=4000, help='Batch size of training generator.')
     p.add("--lr", type=float, default=0.001, help='Base learning rate.')
     p.add('--n_epochs',type=int, default=8000, help='Total number of training epochs.')
 
